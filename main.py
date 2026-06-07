@@ -14,7 +14,7 @@
 #   GET  /search-link  — generate bulk Amazon URL
 # ============================================
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
@@ -23,6 +23,7 @@ import os
 import logging
 import time
 from dotenv import load_dotenv
+from auth import validate_token, AuthenticatedUser, generate_test_token
 
 # Load environment variables from .env file
 load_dotenv()
@@ -264,6 +265,32 @@ def build_amazon_search_link(query: str, asins: List[str]) -> str:
         )
     return f"https://www.amazon.com/s?k={query.replace(' ', '+')}"
 
+# ---- Token generator endpoint ----
+# CONCEPT: This endpoint generates a valid
+# test JWT for our MCP server and headless
+# agent to use. In production this would be
+# replaced by Auth0's token endpoint.
+# Protected by a simple admin secret so
+# only authorised clients can get tokens.
+
+@app.get("/token")
+async def get_test_token(secret: str = Query(...)):
+    admin_secret = os.getenv("ADMIN_SECRET", "admin-secret-2024")
+
+    if secret != admin_secret:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid admin secret"
+        )
+
+    token = generate_test_token()
+    return {
+        "access_token": token,
+        "token_type": "Bearer",
+        "expires_in": 86400,
+        "scope": "amazon:search amazon:read",
+        "note": "Test token — replace with Auth0 in Stage 6"
+    }
 
 # ============================================
 # ENDPOINTS
@@ -292,15 +319,24 @@ async def health_check():
 # filters results by your quality criteria,
 # and returns structured product data.
 
+# ---- @app.post("/search", response_model=SearchResponse)
+# ---- async def search_products(request: SearchRequest):
 @app.post("/search", response_model=SearchResponse)
-async def search_products(request: SearchRequest):
+async def search_products(
+    request: SearchRequest,
+    user: AuthenticatedUser = Depends(validate_token)
+):
+
     start_time = time.time()
 
     logger.info(
-        f"[SEARCH] query='{request.query}' "
-        f"min_price={request.min_price} "
-        f"max_price={request.max_price}"
-    )
+    f"[SEARCH] query='{request.query}' "
+    f"user={user.email} "
+    f"tenant={user.tenant_id} "
+    f"min_price={request.min_price} "
+    f"max_price={request.max_price}"
+)
+
 
     # Call SerpAPI
     raw_results = call_serpapi(request.query)
@@ -347,8 +383,15 @@ async def search_products(request: SearchRequest):
 # details for that specific product.
 # Called by the get_product_details MCP tool.
 
+# --- @app.get("/product/{asin}")
+# --- async def get_product(asin: str):
 @app.get("/product/{asin}")
-async def get_product(asin: str):
+async def get_product(
+    asin: str,
+    user: AuthenticatedUser = Depends(validate_token)
+):
+
+
     logger.info(f"[PRODUCT] Looking up ASIN: {asin}")
 
     # Search Amazon for this specific ASIN
